@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <title>Kontrol Suara dengan Gerakan Tangan - Herika Ramadani</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { 
+      font-family: system-ui, sans-serif; 
+      display:flex; 
+      flex-direction:column;
+      align-items:center;
+      padding:20px; 
+      background:linear-gradient(to bottom,#f0f7ff,#ffffff);
+      color:#222;
+    }
+    h1 {
+      font-size:1.5rem;
+      margin-bottom:4px;
+      color:#004aad;
+    }
+    h2 {
+      font-size:1rem;
+      font-weight:400;
+      margin-top:0;
+      color:#555;
+    }
+    #container { 
+      display:flex; 
+      flex-direction:column; 
+      gap:10px; 
+      width:640px; 
+      max-width:95%;
+      background:#fff; 
+      padding:16px; 
+      border-radius:12px; 
+      box-shadow:0 4px 10px rgba(0,0,0,0.1);
+    }
+    video, canvas { width:100%; border-radius:10px; background:#000; }
+    #controls { display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:space-between; }
+    label { font-size:14px; }
+    button { padding:8px 14px; border:none; border-radius:8px; cursor:pointer; background:#004aad; color:white; font-weight:600; }
+    button:disabled { background:#ccc; cursor:not-allowed; }
+    #status { font-size:14px; color:#333; margin-top:4px; }
+    footer {
+      margin-top:20px;
+      font-size:14px;
+      color:#666;
+    }
+  </style>
+</head>
+<body>
+  <h1>Kontrol Suara dengan Gerakan Tangan</h1>
+  <h2>Dibuat oleh <b>Herika Ramadani</b></h2>
+
+  <div id="container">
+    <video id="video" autoplay playsinline></video>
+    <canvas id="overlay"></canvas>
+
+    <div id="controls">
+      <div style="display:flex;gap:8px;align-items:center;">
+        <button id="startBtn">Mulai Kamera</button>
+        <button id="stopBtn" disabled>Hentikan</button>
+      </div>
+      <label><input type="checkbox" id="showBoxes" checked /> Tampilkan kotak deteksi</label>
+    </div>
+
+    <div id="status">Status: belum berjalan</div>
+
+    <p>
+      💡 <b>Petunjuk:</b> Tunjukkan tangan ke kamera.<br>
+      - Gerakan <b>naik-turun</b> mengubah nada (pitch/frequency).<br>
+      - Gerakan <b>kiri-kanan</b> mengubah arah suara (panning).<br>
+      - Jika tangan keluar dari frame, suara akan berhenti.
+    </p>
+  </div>
+
+  <footer>© 2025 Herika Ramadani</footer>
+
+  <!-- handtrack.js via CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/handtrackjs@0.0.22/dist/handtrack.min.js"></script>
+
+  <script>
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('overlay');
+  const ctx = canvas.getContext('2d');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const statusEl = document.getElementById('status');
+  const showBoxes = document.getElementById('showBoxes');
+
+  const modelParams = {
+    flipHorizontal: true,
+    maxNumBoxes: 1,
+    iouThreshold: 0.5,
+    scoreThreshold: 0.6,
+  };
+
+  let model = null;
+  let isRunning = false;
+  let stream = null;
+  let rafId = null;
+
+  // Audio setup
+  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  let oscillator = null;
+  let gainNode = audioCtx.createGain();
+  let panNode = audioCtx.createStereoPanner();
+
+  gainNode.connect(panNode);
+  panNode.connect(audioCtx.destination);
+  gainNode.gain.value = 0;
+
+  function startTone() {
+    if (oscillator) return;
+    oscillator = audioCtx.createOscillator();
+    oscillator.type = 'sine';
+    oscillator.frequency.value = 220;
+    oscillator.connect(gainNode);
+    oscillator.start();
+    gainNode.gain.linearRampToValueAtTime(0.05, audioCtx.currentTime + 0.05);
+  }
+
+  function stopTone() {
+    if (!oscillator) return;
+    gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.05);
+    setTimeout(() => {
+      if (oscillator) {
+        oscillator.stop();
+        oscillator.disconnect();
+        oscillator = null;
+      }
+    }, 100);
+  }
+
+  function mapRange(v, inMin, inMax, outMin, outMax) {
+    return outMin + (outMax - outMin) * ((v - inMin) / (inMax - inMin));
+  }
+
+  function drawPredictions(predictions) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (!predictions || predictions.length === 0) return;
+    predictions.forEach(pred => {
+      const [x, y, w, h] = pred.bbox;
+      if (showBoxes.checked) {
+        ctx.strokeStyle = 'lime';
+        ctx.lineWidth = 3;
+        ctx.strokeRect(x, y, w, h);
+      }
+    });
+  }
+
+  async function processFrame() {
+    if (!isRunning) return;
+    const predictions = await model.detect(video);
+    drawPredictions(predictions);
+
+    if (predictions && predictions.length > 0) {
+      const [x, y, w, h] = predictions[0].bbox;
+      const cx = x + w / 2;
+      const cy = y + h / 2;
+      const nx = cx / canvas.width;
+      const ny = cy / canvas.height;
+
+      const freq = Math.round(mapRange(1 - ny, 0, 1, 130, 1000));
+      const pan = mapRange(nx, 0, 1, -1, 1);
+      const vol = mapRange(w * h, 5000, 40000, 0.02, 0.1);
+
+      startTone();
+      if (oscillator) oscillator.frequency.setTargetAtTime(freq, audioCtx.currentTime, 0.05);
+      gainNode.gain.setTargetAtTime(vol, audioCtx.currentTime, 0.05);
+      panNode.pan.setTargetAtTime(pan, audioCtx.currentTime, 0.05);
+
+      statusEl.textContent = `Terdeteksi tangan — Frekuensi: ${freq} Hz | Volume: ${vol.toFixed(3)} | Panning: ${pan.toFixed(2)}`;
+    } else {
+      stopTone();
+      statusEl.textContent = 'Tidak ada tangan terdeteksi — suara berhenti';
+    }
+
+    rafId = requestAnimationFrame(processFrame);
+  }
+
+  async function start() {
+    if (isRunning) return;
+    statusEl.textContent = 'Memuat model...';
+    model = await handTrack.load(modelParams);
+    statusEl.textContent = 'Mengaktifkan kamera...';
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      video.srcObject = stream;
+      await video.play();
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      isRunning = true;
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      statusEl.textContent = 'Deteksi berjalan...';
+      processFrame();
+    } catch (err) {
+      console.error(err);
+      statusEl.textContent = 'Gagal membuka kamera: ' + err.message;
+    }
+  }
+
+  function stop() {
+    isRunning = false;
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (rafId) cancelAnimationFrame(rafId);
+    stopTone();
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    statusEl.textContent = 'Berhenti';
+  }
+
+  startBtn.addEventListener('click', async () => {
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+    start();
+  });
+
+  stopBtn.addEventListener('click', stop);
+  </script>
+</body>
+</html>
